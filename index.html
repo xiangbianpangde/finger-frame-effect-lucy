@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Finger Frame Live AI</title>
+  <title>手指取景框 · 实时 AI</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body {
@@ -229,7 +229,7 @@
 <body>
   <div id="status">
     <div class="spinner"></div>
-    <div id="status-text">Loading hand tracker…</div>
+    <div id="status-text">正在加载手势追踪…</div>
   </div>
 
   <div id="stage">
@@ -239,36 +239,39 @@
   </div>
 
   <div id="hint">
-    <div id="hint-text">Frame your shot 🎬 — both hands up, thumbs and index fingers out.</div>
+    <div id="hint-text">双手比出取景框 🎬 — 拇指与食指张开即可</div>
   </div>
 
-  <div id="live-pill"><span class="dot"></span><span id="live-text">LIVE</span></div>
+  <div id="live-pill"><span class="dot"></span><span id="live-text">实时</span></div>
 
   <div id="toolbar"></div>
 
-  <button id="key-btn" title="Decart API key">🔑</button>
+  <button id="key-btn" title="Decart API 密钥">🔑</button>
   <div id="key-panel" class="hidden">
-    <h3>Decart API key</h3>
+    <h3>Decart API 密钥</h3>
     <p>
-      The window shows a <strong>live AI world</strong> generated in real time
-      by <a href="https://docs.platform.decart.ai/models/realtime/lucy-2.5" target="_blank" rel="noopener">Decart Lucy 2.5</a>
-      (30fps video-to-video over WebRTC). Get a key at
-      <a href="https://platform.decart.ai/" target="_blank" rel="noopener">platform.decart.ai</a>.
+      取景框内会显示由
+      <a href="https://docs.platform.decart.ai/models/realtime/lucy-2.5" target="_blank" rel="noopener">Decart Lucy 2.5</a>
+      实时生成的 <strong>AI 世界</strong>
+      （30fps 视频到视频，经 WebRTC 传输）。请到
+      <a href="https://platform.decart.ai/" target="_blank" rel="noopener">platform.decart.ai</a>
+      获取密钥。
     </p>
-    <input id="key-input" type="password" placeholder="your Decart API key" autocomplete="off" />
+    <input id="key-input" type="password" placeholder="粘贴你的 Decart API 密钥" autocomplete="off" />
     <label class="remember">
-      <input type="checkbox" id="key-remember" /> Remember on this device
+      <input type="checkbox" id="key-remember" /> 在此设备上记住
     </label>
-    <h3>Custom style</h3>
+    <h3>自定义风格</h3>
     <textarea id="style-custom" rows="3"
-      placeholder="Used by the Custom effect. Lucy works best with its templates, e.g. 'Change the style of the video to stained glass: …', 'Substitute the character in the video with …', or 'Add floating lanterns to the background.'"></textarea>
+      placeholder="供「自定义」效果使用。Lucy 对英文模板效果最好，例如：'Change the style of the video to stained glass: …'、'Substitute the character in the video with …' 或 'Add floating lanterns to the background.'"></textarea>
     <div class="row">
-      <button id="key-save">Save &amp; connect</button>
-      <button id="key-clear">Clear</button>
+      <button id="key-save">保存并连接</button>
+      <button id="key-clear">清除</button>
     </div>
     <p class="note">
-      Your key stays in your browser and is used only for the WebRTC session
-      with Decart. Without a key, effects fall back to a local color filter.
+      密钥仅保存在你的浏览器中，只用于与 Decart 的 WebRTC 会话。
+      未填写密钥时，框内会回退为本地色彩滤镜，手势追踪仍可演示。
+      若连接失败，请确认密钥正确，且网络能访问 Decart（部分地区需代理）。
     </p>
   </div>
 

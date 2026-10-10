@@ -35,7 +35,8 @@ const liveText = document.getElementById("live-text");
 const EFFECTS = [
   {
     id: "movie3d",
-    label: "3D Movie",
+    label: "3D 电影",
+    // Keep prompts in English — Lucy responds best to Decart's English templates.
     prompt:
       "Change the style of the video to a 3D animated movie: stylized CGI " +
       "animation, the person as an animated character with expressive big " +
@@ -43,14 +44,14 @@ const EFFECTS = [
   },
   {
     id: "anime",
-    label: "Anime",
+    label: "动漫",
     prompt:
       "Change the style of the video to hand-drawn anime: clean black line " +
       "art, flat cel shading, vibrant colors, large expressive eyes.",
   },
   {
     id: "cyberpunk",
-    label: "Cyberpunk",
+    label: "赛博朋克",
     prompt:
       "Change the style of the video to neon cyberpunk: glowing pink and " +
       "cyan neon light on the person and walls, rain-slick reflective " +
@@ -58,7 +59,7 @@ const EFFECTS = [
   },
   {
     id: "watercolor",
-    label: "Watercolor",
+    label: "水彩",
     prompt:
       "Change the style of the video to a watercolor painting: soft loose " +
       "brushstrokes, gentle color bleeds, visible paper texture, muted " +
@@ -66,14 +67,14 @@ const EFFECTS = [
   },
   {
     id: "lego",
-    label: "LEGO",
+    label: "乐高",
     prompt:
       "Change the style of the video to a LEGO stop-motion animation: the " +
       "person is a yellow LEGO minifigure with a cylindrical head, painted " +
       "face, and claw hands, and the room is built entirely from glossy " +
       "plastic LEGO bricks with visible round studs on every surface.",
   },
-  { id: "custom", label: "Custom ✨", prompt: null },
+  { id: "custom", label: "自定义 ✨", prompt: null },
 ];
 let effect = "movie3d";
 
@@ -83,6 +84,9 @@ let customPrompt = localStorage.getItem("lucy-custom") || "";
 let realtimeClient = null;
 let lucyLive = false;
 let cameraStream = null;
+// Separate cloned stream for Decart/LiveKit so the local preview + MediaPipe
+// tracks are never stopped or exclusive-consumed by the WebRTC publish path.
+let lucyInputStream = null;
 
 // Smoothed quad corners + presence fade (0..1).
 let corners = null;
@@ -160,29 +164,101 @@ function setPill(state, text) {
   liveText.textContent = text;
 }
 
+// Clone camera tracks so WebRTC/LiveKit cannot kill the local preview stream.
+function cloneCameraStream(src) {
+  if (!src) return null;
+  const tracks = src.getTracks().map((t) => t.clone());
+  return new MediaStream(tracks);
+}
+
+function stopStream(stream) {
+  if (!stream) return;
+  for (const t of stream.getTracks()) {
+    try {
+      t.stop();
+    } catch {}
+  }
+}
+
+function ensureLocalPreview() {
+  // If SDK/WebRTC ever mutates the original stream, re-bind the local <video>.
+  if (!cameraStream) return;
+  const live = cameraStream.getVideoTracks().some((t) => t.readyState === "live");
+  if (!live) return;
+  if (video.srcObject !== cameraStream) video.srcObject = cameraStream;
+  if (video.paused) video.play().catch(() => {});
+}
+
+function friendlyConnectError(err) {
+  const msg = String(err?.message || err || "连接失败");
+  const code = err?.code || err?.data?.code || "";
+  const lower = msg.toLowerCase();
+  if (code === "INVALID_API_KEY" || lower.includes("api key") || lower.includes("401")) {
+    return "密钥无效，请检查 Decart API Key";
+  }
+  if (lower.includes("ice") || lower.includes("webrtc") || lower.includes("websocket")) {
+    return "网络/WebRTC 失败（需能访问 Decart，部分网络需代理）";
+  }
+  if (lower.includes("failed to fetch") || lower.includes("network") || lower.includes("load")) {
+    return "无法加载 Decart SDK 或接口（检查网络/代理）";
+  }
+  return msg.slice(0, 80);
+}
+
 // ---- Decart Lucy 2.5 (realtime video-to-video over WebRTC) ----
 async function connectLucy() {
   if (!apiKey || !cameraStream || DEMO) return;
   try {
-    setPill("connecting", "CONNECTING…");
+    setPill("connecting", "连接中…");
+    ensureLocalPreview();
+
+    // Always feed Lucy a cloned stream — never the same tracks as local preview.
+    stopStream(lucyInputStream);
+    lucyInputStream = cloneCameraStream(cameraStream);
+    if (!lucyInputStream?.getVideoTracks().length) {
+      throw new Error("摄像头视频轨道不可用");
+    }
+
     const { createDecartClient, models } = await import(DECART_SDK_URL);
     const model = models.realtime("lucy-2.5");
     const client = createDecartClient({ apiKey });
-    realtimeClient = await client.realtime.connect(cameraStream, {
+    realtimeClient = await client.realtime.connect(lucyInputStream, {
       model,
+      // Keep local orientation; the canvas already mirrors for display.
+      // (SDK default may also mirror user-facing cams — double-mirror is OK for AI.)
       initialState: { prompt: { text: currentPrompt(), enhance: true } },
       onRemoteStream: (stream) => {
         lucyVid.srcObject = stream;
         lucyVid.play().catch(() => {});
         lucyLive = true;
-        setPill("", "LIVE");
+        setPill("", "实时");
+        ensureLocalPreview();
       },
     });
+    // Some SDK versions return a client that emits remote stream via event only.
+    if (typeof realtimeClient?.on === "function") {
+      realtimeClient.on("remoteStream", (stream) => {
+        lucyVid.srcObject = stream;
+        lucyVid.play().catch(() => {});
+        lucyLive = true;
+        setPill("", "实时");
+        ensureLocalPreview();
+      });
+      realtimeClient.on("disconnected", () => {
+        lucyLive = false;
+        setPill("error", "AI 已断开");
+        ensureLocalPreview();
+      });
+    }
+    ensureLocalPreview();
     console.log("Lucy connected", realtimeClient);
   } catch (err) {
     console.error("Lucy connect failed:", err);
     lucyLive = false;
-    setPill("error", "AI OFFLINE — " + (err.message || "connect failed").slice(0, 60));
+    stopStream(lucyInputStream);
+    lucyInputStream = null;
+    ensureLocalPreview();
+    setPill("error", "AI 离线 — " + friendlyConnectError(err));
   }
 }
 
@@ -195,6 +271,10 @@ async function disconnectLucy() {
   } catch {}
   realtimeClient = null;
   lucyVid.srcObject = null;
+  // Stop only the cloned tracks — never the live cameraStream used by preview.
+  stopStream(lucyInputStream);
+  lucyInputStream = null;
+  ensureLocalPreview();
 }
 
 function setupKeyPanel() {
@@ -219,9 +299,16 @@ function setupKeyPanel() {
     customPrompt = custom.value;
     localStorage.setItem("lucy-custom", customPrompt);
     panel.classList.add("hidden");
-    await disconnectLucy();
-    if (apiKey) connectLucy();
-    else pushPrompt();
+    try {
+      await disconnectLucy();
+      ensureLocalPreview();
+      if (apiKey) await connectLucy();
+      else pushPrompt();
+    } catch (err) {
+      console.error("save/connect failed:", err);
+      ensureLocalPreview();
+      setPill("error", "AI 离线 — " + friendlyConnectError(err));
+    }
   });
   document.getElementById("key-clear").addEventListener("click", async () => {
     apiKey = "";
@@ -240,7 +327,7 @@ async function init() {
   if (DEMO) {
     stream = makeDemoStream();
   } else {
-    statusText.textContent = "Loading hand tracker…";
+    statusText.textContent = "正在加载手势追踪…";
     const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
     landmarker = await HandLandmarker.createFromOptions(fileset, {
       baseOptions: { modelAssetPath: MODEL_URL, delegate: "GPU" },
@@ -251,7 +338,7 @@ async function init() {
       minTrackingConfidence: 0.3,
     });
 
-    statusText.textContent = "Requesting camera…";
+    statusText.textContent = "正在请求摄像头…";
     // Lucy 2.5 expects 1280x720 @ 30fps landscape input.
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
@@ -277,12 +364,25 @@ async function init() {
 }
 
 // Draw a (mirrored) source onto any 2d context, filling w x h.
+// Returns false if the source has no drawable frame (avoids painting pure black).
 function drawMirrored(c, w, h, src = video) {
-  c.save();
-  c.translate(w, 0);
-  c.scale(-1, 1);
-  c.drawImage(src, 0, 0, w, h);
-  c.restore();
+  const ready =
+    src &&
+    (src.readyState === undefined || src.readyState >= 2) &&
+    (src.videoWidth === undefined || src.videoWidth > 0);
+  if (!ready) return false;
+  try {
+    c.save();
+    c.translate(w, 0);
+    c.scale(-1, 1);
+    c.drawImage(src, 0, 0, w, h);
+    c.restore();
+    return true;
+  } catch (err) {
+    console.warn("drawMirrored failed:", err);
+    c.restore?.();
+    return false;
+  }
 }
 
 function toPixel(lm) {
@@ -362,28 +462,33 @@ function applyEffect(q) {
   ctx.clip();
   ctx.globalAlpha = presence;
 
-  if (lucyLive && lucyVid.readyState >= 2) {
+  let drewAi = false;
+  if (lucyLive && lucyVid.readyState >= 2 && lucyVid.videoWidth > 0) {
     // The live AI stream is a full-frame transform of the same camera feed —
     // draw it mirrored and screen-aligned so the finger frame is a window
     // into the AI world, staying registered as hands move.
-    drawMirrored(ctx, w, h, lucyVid);
-  } else {
-    // Keyless fallback: local color shift so the window still does something.
+    drewAi = drawMirrored(ctx, w, h, lucyVid);
+  }
+  if (!drewAi) {
+    // Fallback while connecting / remote frames not ready / no key:
+    // local color shift so the window never becomes a pure black hole.
     ctx.filter = "hue-rotate(140deg) saturate(1.6) contrast(1.1)";
     drawMirrored(ctx, w, h);
     ctx.filter = "none";
+    const cx = q.reduce((s, p) => s + p.x, 0) / 4;
+    const cy = q.reduce((s, p) => s + p.y, 0) / 4;
+    ctx.font = `600 ${Math.round(w / 55)}px -apple-system, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.shadowColor = "rgba(0,0,0,0.7)";
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "rgba(255,255,255,0.95)";
     if (!apiKey && !DEMO) {
-      const cx = q.reduce((s, p) => s + p.x, 0) / 4;
-      const cy = q.reduce((s, p) => s + p.y, 0) / 4;
-      ctx.font = `600 ${Math.round(w / 55)}px -apple-system, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.shadowColor = "rgba(0,0,0,0.7)";
-      ctx.shadowBlur = 8;
-      ctx.fillStyle = "rgba(255,255,255,0.95)";
-      ctx.fillText("🔑 Add your Decart key for the live AI world", cx, cy);
-      ctx.shadowBlur = 0;
+      ctx.fillText("🔑 添加 Decart 密钥以开启实时 AI 世界", cx, cy);
+    } else if (apiKey && !lucyLive) {
+      ctx.fillText("AI 连接中… 框内先显示本地滤镜", cx, cy);
     }
+    ctx.shadowBlur = 0;
   }
 
   ctx.restore();
@@ -432,73 +537,91 @@ function drawFrameOutline(q) {
 }
 
 function loop() {
-  const w = canvas.width;
-  const h = canvas.height;
+  try {
+    const w = canvas.width;
+    const h = canvas.height;
 
-  // Base layer: mirrored camera feed.
-  drawMirrored(ctx, w, h);
+    // Base layer: mirrored camera feed. If preview died, keep canvas readable.
+    const drew = drawMirrored(ctx, w, h);
+    if (!drew) {
+      ctx.fillStyle = "#0a0a0c";
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      ctx.font = "600 16px -apple-system, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("摄像头预览中断，正在尝试恢复…", w / 2, h / 2);
+      ensureLocalPreview();
+    }
 
-  // Run detection once per new video frame.
-  if (DEMO) {
-    lastResults = { landmarks: fakeHands(performance.now() / 1000) };
-  } else if (video.currentTime !== lastVideoTime) {
-    lastVideoTime = video.currentTime;
-    lastResults = landmarker.detectForVideo(video, performance.now());
-  }
+    // Run detection once per new video frame.
+    if (DEMO) {
+      lastResults = { landmarks: fakeHands(performance.now() / 1000) };
+    } else if (landmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+      lastVideoTime = video.currentTime;
+      try {
+        lastResults = landmarker.detectForVideo(video, performance.now());
+      } catch (err) {
+        // One bad frame must not kill the animation loop.
+        console.warn("hand detect failed:", err);
+      }
+    }
 
-  let targetQuad = null;
-  if (lastResults && lastResults.landmarks && lastResults.landmarks.length === 2) {
-    targetQuad = computeQuad(lastResults.landmarks);
-  }
+    let targetQuad = null;
+    if (lastResults && lastResults.landmarks && lastResults.landmarks.length === 2) {
+      targetQuad = computeQuad(lastResults.landmarks);
+    }
 
-  if (targetQuad) {
-    if (!corners) {
-      lostFrames = 0;
-      frameActive = true;
-      jumpFrames = 0;
-      corners = targetQuad;
-      presence = Math.min(1, presence + 0.12);
-    } else {
-      const moved =
-        targetQuad.reduce((s, p, i) => s + dist(p, corners[i]), 0) / 4;
-      // Only quads that genuinely teleport (≥30% of the screen in one frame,
-      // beyond any real hand motion) are treated as suspect mis-detections.
-      if (moved > canvas.width * 0.3 && ++jumpFrames < JUMP_CONFIRM_FRAMES) {
-        if (++lostFrames > MAX_LOST_FRAMES) {
-          presence = Math.max(0, presence - 0.05);
-        }
-      } else {
+    if (targetQuad) {
+      if (!corners) {
         lostFrames = 0;
         frameActive = true;
         jumpFrames = 0;
-        // Velocity-adaptive smoothing: damp pixel jitter when nearly still,
-        // follow at high gain the moment the hands genuinely move.
-        const alpha = Math.min(
-          0.85,
-          Math.max(0.35, moved / (canvas.width * 0.05))
-        );
-        corners = corners.map((c, i) => lerpPt(c, targetQuad[i], alpha));
+        corners = targetQuad;
         presence = Math.min(1, presence + 0.12);
+      } else {
+        const moved =
+          targetQuad.reduce((s, p, i) => s + dist(p, corners[i]), 0) / 4;
+        // Only quads that genuinely teleport (≥30% of the screen in one frame,
+        // beyond any real hand motion) are treated as suspect mis-detections.
+        if (moved > canvas.width * 0.3 && ++jumpFrames < JUMP_CONFIRM_FRAMES) {
+          if (++lostFrames > MAX_LOST_FRAMES) {
+            presence = Math.max(0, presence - 0.05);
+          }
+        } else {
+          lostFrames = 0;
+          frameActive = true;
+          jumpFrames = 0;
+          // Velocity-adaptive smoothing: damp pixel jitter when nearly still,
+          // follow at high gain the moment the hands genuinely move.
+          const alpha = Math.min(
+            0.85,
+            Math.max(0.35, moved / (canvas.width * 0.05))
+          );
+          corners = corners.map((c, i) => lerpPt(c, targetQuad[i], alpha));
+          presence = Math.min(1, presence + 0.12);
+        }
+      }
+    } else if (corners && ++lostFrames <= MAX_LOST_FRAMES) {
+      // Brief tracking dropout: hold the last quad instead of fading.
+      presence = Math.min(1, presence + 0.12);
+    } else {
+      presence = Math.max(0, presence - 0.05);
+      if (presence === 0) {
+        corners = null;
+        frameActive = false;
+        jumpFrames = 0;
       }
     }
-  } else if (corners && ++lostFrames <= MAX_LOST_FRAMES) {
-    // Brief tracking dropout: hold the last quad instead of fading.
-    presence = Math.min(1, presence + 0.12);
-  } else {
-    presence = Math.max(0, presence - 0.05);
-    if (presence === 0) {
-      corners = null;
-      frameActive = false;
-      jumpFrames = 0;
+
+    if (corners && presence > 0.01) {
+      applyEffect(corners);
+      drawFrameOutline(corners);
     }
-  }
 
-  if (corners && presence > 0.01) {
-    applyEffect(corners);
-    drawFrameOutline(corners);
+    hintEl.classList.toggle("hidden", presence > 0.5);
+  } catch (err) {
+    console.error("render loop error:", err);
   }
-
-  hintEl.classList.toggle("hidden", presence > 0.5);
 
   requestAnimationFrame(loop);
 }
@@ -532,7 +655,7 @@ function makeDemoStream() {
     d.save();
     d.translate(demo.width, 0);
     d.scale(-1, 1);
-    d.fillText("DEMO FEED", demo.width / 2, demo.height / 2);
+    d.fillText("演示画面", demo.width / 2, demo.height / 2);
     d.restore();
     requestAnimationFrame(paint);
   }
@@ -571,6 +694,6 @@ init().catch((err) => {
   statusEl.querySelector(".spinner")?.remove();
   statusText.textContent =
     err.name === "NotAllowedError"
-      ? "Camera permission was denied. Allow camera access and reload."
-      : `Failed to start: ${err.message}`;
+      ? "摄像头权限被拒绝。请允许访问摄像头后刷新页面。"
+      : `启动失败：${err.message}`;
 });
